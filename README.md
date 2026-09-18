@@ -3,10 +3,10 @@
 Authenticate by oidc: verifies an ID token against the issuer's published keys and the nonce. A technology of
 [xmip-core-authenticate](https://github.com/IlleNilsson/xmip-core-authenticate).
 
-Declared and not yet written; `architecture.toml` carries the maturity. When
-it is written it implements `Authenticator`, one mechanism at one gate (ADR-0050).
-What it may depend on is `repository-model.md` section 4 and ADR-0044: its
-capability, and no sibling.
+It checks an ID token's RS256 or ES256 signature against a JWKS document held
+as configuration, then issuer, audience, `azp`, expiry with leeway, the subject
+and a nonce the node issued, spent once. It never fetches `jwks_uri` or a
+discovery document (ADR-0045), and it does not check `at_hash` or `c_hash`.
 
 ## Toolchain
 
