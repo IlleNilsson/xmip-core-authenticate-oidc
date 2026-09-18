@@ -25,6 +25,12 @@
 //! any other algorithm, `none` and the HMAC family included, is refused by
 //! name. `at_hash` and `c_hash` are not checked, because no access token or
 //! code reaches this gate; `acr` and `auth_time` are authorization's.
+//!
+//! A node that expects one account says so with
+//! [`Verifier::expecting_principal`]: the token's `upn`, else its
+//! `preferred_username`, is then read as the identify capability's
+//! `UserPrincipalName` and must be the same account, whichever way either
+//! was spelled (ADR-0054). Without it nothing about the name is asked.
 
 pub mod jwks;
 
@@ -32,6 +38,7 @@ pub use jwks::{Algorithm, Jwks};
 
 use authenticate::{AuthenticateError, Authenticator, Presented};
 use context::Verified;
+use identify::UserPrincipalName;
 use identify::jwt::Compact;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -62,6 +69,7 @@ pub struct Verifier {
     issuer: String,
     client: String,
     nonces: Option<Mutex<Vec<String>>>,
+    principal: Option<UserPrincipalName>,
     leeway: i64,
     clock: Clock,
 }
@@ -76,6 +84,7 @@ impl Verifier {
             issuer: issuer.into(),
             client: client.into(),
             nonces: Some(Mutex::new(Vec::new())),
+            principal: None,
             leeway: 60,
             clock: Box::new(now),
         }
@@ -86,6 +95,14 @@ impl Verifier {
     #[must_use]
     pub fn without_nonce(mut self) -> Self {
         self.nonces = None;
+        self
+    }
+
+    /// Expect the token to name this account in its `upn`, else in its
+    /// `preferred_username`. Any spelling of the same account meets it.
+    #[must_use]
+    pub fn expecting_principal(mut self, principal: UserPrincipalName) -> Self {
+        self.principal = Some(principal);
         self
     }
 
@@ -164,6 +181,28 @@ impl Verifier {
         Ok(())
     }
 
+    /// Where an account is expected, the token names it.
+    fn check_principal(&self, compact: &Compact) -> Result<(), AuthenticateError> {
+        let Some(expected) = &self.principal else {
+            return Ok(());
+        };
+        let read = |claim: &str| {
+            compact
+                .claim(claim)
+                .and_then(|text| UserPrincipalName::parse(&text))
+        };
+        match read("upn").or_else(|| read("preferred_username")) {
+            Some(named) if named.is(expected) => Ok(()),
+            Some(named) => Err(AuthenticateError::new(format!(
+                "the ID token names '{named}' and this node expects '{expected}'"
+            ))),
+            None => Err(AuthenticateError::new(format!(
+                "the ID token carries no user principal name in `upn` or \
+                 `preferred_username` and this node expects '{expected}'"
+            ))),
+        }
+    }
+
     /// Spend the token's nonce. Last, so a token that fails another check
     /// does not cost the login its nonce.
     fn spend_nonce(&self, compact: &Compact) -> Result<(), AuthenticateError> {
@@ -225,6 +264,7 @@ impl Authenticator for Verifier {
             &compact.signature,
         )?;
         self.check_claims(&compact, &presented.value)?;
+        self.check_principal(&compact)?;
         self.spend_nonce(&compact)?;
 
         Ok(Verified::Proven)
@@ -302,6 +342,47 @@ mod tests {
 
         assert_eq!(verified, Verified::Proven);
         assert!(replayed.message.contains("already spent"));
+    }
+
+    fn expecting(issuer: &Issuer, principal: &str) -> Verifier {
+        let principal = UserPrincipalName::parse(principal).expect("a name");
+        issuer
+            .verifier()
+            .without_nonce()
+            .expecting_principal(principal)
+    }
+
+    #[test]
+    fn a_token_naming_the_expected_account_in_either_claim_and_spelling_is_proven() {
+        let issuer = Issuer::new();
+        let gate = expecting(&issuer, "PARTNERX\\jane");
+        let by_upn = claims(
+            r#","upn":"Jane@PartnerX","preferred_username":"x@y""#,
+            NOW + 300,
+        );
+        let by_username = claims(r#","preferred_username":"jane@partnerx""#, NOW + 300);
+
+        for claims in [by_upn, by_username] {
+            let verified = gate.verify(&presented(&issuer.token(&claims)));
+            assert_eq!(verified.expect("proven"), Verified::Proven, "{claims}");
+        }
+    }
+
+    #[test]
+    fn a_token_naming_another_account_is_refused_naming_both_and_one_naming_none_says_so() {
+        let issuer = Issuer::new();
+        let gate = expecting(&issuer, "jane@partnerx");
+        let other = issuer.token(&claims(r#","upn":"mallory@partnerx""#, NOW + 300));
+        let bare = issuer.token(&claims(r#","preferred_username":"jane""#, NOW + 300));
+
+        let refused = gate.verify(&presented(&other)).expect_err("refused");
+        let unnamed = gate.verify(&presented(&bare)).expect_err("refused");
+
+        assert_eq!(
+            refused.message,
+            "the ID token names 'mallory@partnerx' and this node expects 'jane@partnerx'"
+        );
+        assert!(unnamed.message.contains("carries no user principal name"));
     }
 
     #[test]
