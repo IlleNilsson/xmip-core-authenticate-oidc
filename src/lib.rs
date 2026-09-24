@@ -35,8 +35,9 @@
 
 use authenticate::clock::{Clock, Window};
 use authenticate::jose::{Algorithm, KeySet};
-use authenticate::{AuthenticateError, Authenticator, Presented};
+use authenticate::{AuthenticateError, Authenticator};
 use context::Verified;
+use identify::Presented;
 use identify::UserPrincipalName;
 use identify::evidence::{self, OIDC_TOKEN};
 use identify::jwt::Compact;
