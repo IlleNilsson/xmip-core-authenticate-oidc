@@ -20,7 +20,8 @@
 //! with [`Verifier::without_nonce`], and gives replay protection up knowingly.
 //!
 //! Offline throughout (ADR-0045): the key set is configuration, a JWKS
-//! document handed to [`Jwks::parse`], never fetched from `jwks_uri`, and
+//! document read by the capability's `KeySet::from_jwks` (`authenticate::jose`,
+//! the keys `jwt` verifies with too), never fetched from `jwks_uri`, and
 //! rotated by whoever rotates configuration. RS256 and ES256 are verified;
 //! any other algorithm, `none` and the HMAC family included, is refused by
 //! name. `at_hash` and `c_hash` are not checked, because no access token or
@@ -32,45 +33,27 @@
 //! `UserPrincipalName` and must be the same account, whichever way either
 //! was spelled (ADR-0054). Without it nothing about the name is asked.
 
-pub mod jwks;
-
-pub use jwks::{Algorithm, Jwks};
-
+use authenticate::clock::{Clock, Window};
+use authenticate::jose::{Algorithm, KeySet};
 use authenticate::{AuthenticateError, Authenticator, Presented};
 use context::Verified;
 use identify::UserPrincipalName;
+use identify::evidence::{self, OIDC_TOKEN};
 use identify::jwt::Compact;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
 use xcore::{Mechanism, mechanism};
-
-/// The proof the identify sibling attaches the compact ID token under.
-pub const TOKEN: &str = "oidc.token";
 
 /// How many nonces may be outstanding before the oldest is forgotten.
 const OUTSTANDING: usize = 4096;
 
-type Clock = Box<dyn Fn() -> i64 + Send + Sync>;
-
-/// Seconds since the Unix epoch, now.
-#[must_use]
-pub fn now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-        })
-}
-
 /// The oidc authenticator: one issuer, its keys as the node holds them, and
 /// the client id the node is known to that issuer by.
 pub struct Verifier {
-    keys: Jwks,
+    keys: KeySet,
     issuer: String,
     client: String,
     nonces: Option<Mutex<Vec<String>>>,
     principal: Option<UserPrincipalName>,
-    leeway: i64,
     clock: Clock,
 }
 
@@ -78,15 +61,14 @@ impl Verifier {
     /// Verifies tokens from `issuer` for the client id `client` against
     /// `keys`, requiring an outstanding nonce, with sixty seconds of leeway.
     #[must_use]
-    pub fn new(keys: Jwks, issuer: impl Into<String>, client: impl Into<String>) -> Self {
+    pub fn new(keys: KeySet, issuer: impl Into<String>, client: impl Into<String>) -> Self {
         Self {
             keys,
             issuer: issuer.into(),
             client: client.into(),
             nonces: Some(Mutex::new(Vec::new())),
             principal: None,
-            leeway: 60,
-            clock: Box::new(now),
+            clock: Clock::system(60),
         }
     }
 
@@ -108,15 +90,15 @@ impl Verifier {
 
     /// How far a clock may be off before `exp` and `nbf` bite.
     #[must_use]
-    pub const fn with_leeway(mut self, seconds: i64) -> Self {
-        self.leeway = seconds;
+    pub fn with_leeway(mut self, seconds: i64) -> Self {
+        self.clock = self.clock.forgiving(seconds);
         self
     }
 
     /// Where the time comes from; the tests pin it.
     #[must_use]
     pub fn with_clock(mut self, clock: impl Fn() -> i64 + Send + Sync + 'static) -> Self {
-        self.clock = Box::new(clock);
+        self.clock = self.clock.reading(clock);
         self
     }
 
@@ -134,8 +116,6 @@ impl Verifier {
     }
 
     fn check_claims(&self, compact: &Compact, subject: &str) -> Result<(), AuthenticateError> {
-        let now = (self.clock)();
-
         if compact.claim("iss").as_deref() != Some(self.issuer.as_str()) {
             return Err(AuthenticateError::new(format!(
                 "the ID token's issuer is not '{}'",
@@ -161,18 +141,9 @@ impl Verifier {
                 "the ID token carries no `exp` and OIDC requires one",
             ));
         };
-        if now > expiry.saturating_add(self.leeway) {
-            return Err(AuthenticateError::new(format!(
-                "the ID token expired at {expiry} and it is {now}"
-            )));
-        }
-        if let Some(not_before) = compact.numeric_claim("nbf")
-            && now.saturating_add(self.leeway) < not_before
-        {
-            return Err(AuthenticateError::new(format!(
-                "the ID token is not valid before {not_before} and it is {now}"
-            )));
-        }
+        self.clock
+            .admits(Window::between(compact.numeric_claim("nbf"), Some(expiry)))
+            .map_err(|outside| AuthenticateError::new(format!("the ID token {outside}")))?;
         if compact.claim("sub").as_deref() != Some(subject) {
             return Err(AuthenticateError::new(
                 "the ID token's subject is not the claimed value",
@@ -244,19 +215,21 @@ impl Authenticator for Verifier {
                 "'{name}' was presented and this authenticator verifies oidc"
             )));
         }
-        let token = presented
-            .proof(TOKEN)
-            .ok_or_else(|| AuthenticateError::new(format!("no {TOKEN} proof was presented")))?;
+        let token = presented.proof(evidence::OIDC_TOKEN).ok_or_else(|| {
+            AuthenticateError::new(format!("no {OIDC_TOKEN} proof was presented"))
+        })?;
         let compact =
             Compact::parse(token).map_err(|failure| AuthenticateError::new(failure.message))?;
 
         let named = compact.algorithm().unwrap_or_default();
-        let algorithm = Algorithm::named(&named).ok_or_else(|| {
-            AuthenticateError::new(format!(
-                "the ID token's algorithm '{named}' is not one this node verifies: \
+        let algorithm = Algorithm::named(&named)
+            .filter(|algorithm| *algorithm != Algorithm::Hs256)
+            .ok_or_else(|| {
+                AuthenticateError::new(format!(
+                    "the ID token's algorithm '{named}' is not one this node verifies: \
                  RS256 and ES256 are"
-            ))
-        })?;
+                ))
+            })?;
         self.keys.verify(
             algorithm,
             compact.key_id().as_deref(),
@@ -274,9 +247,6 @@ impl Authenticator for Verifier {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jwks::tests::p256_jwk;
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::traits::PublicKeyParts;
 
@@ -286,11 +256,21 @@ mod tests {
     fn mint(header: &str, claims: &str, sign: impl Fn(&[u8]) -> Vec<u8>) -> String {
         let input = format!(
             "{}.{}",
-            URL_SAFE_NO_PAD.encode(header),
-            URL_SAFE_NO_PAD.encode(claims)
+            codec::base64::encode_url_unpadded(header.as_bytes()),
+            codec::base64::encode_url_unpadded(claims.as_bytes())
         );
         let signature = sign(input.as_bytes());
-        format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature))
+        format!("{input}.{}", codec::base64::encode_url_unpadded(&signature))
+    }
+
+    /// A P-256 key as a JWK, as an issuer would publish it.
+    fn p256_jwk(id: &str, key: &p256::ecdsa::SigningKey) -> String {
+        let point = key.verifying_key().to_encoded_point(false);
+        format!(
+            r#"{{"kty":"EC","crv":"P-256","use":"sig","kid":"{id}","x":"{}","y":"{}"}}"#,
+            codec::base64::encode_url_unpadded(point.x().expect("x")),
+            codec::base64::encode_url_unpadded(point.y().expect("y"))
+        )
     }
 
     fn claims(extra: &str, expiry: i64) -> String {
@@ -310,8 +290,9 @@ mod tests {
             }
         }
 
-        fn jwks(&self) -> Jwks {
-            Jwks::parse(&format!(r#"{{"keys":[{}]}}"#, p256_jwk("e1", &self.key))).expect("a set")
+        fn jwks(&self) -> KeySet {
+            KeySet::from_jwks(&format!(r#"{{"keys":[{}]}}"#, p256_jwk("e1", &self.key)))
+                .expect("a set")
         }
 
         fn token(&self, claims: &str) -> String {
@@ -327,7 +308,7 @@ mod tests {
     }
 
     fn presented(token: &str) -> Presented {
-        Presented::passed(mechanism::oidc(), "partner-x").with_proof(TOKEN, token)
+        Presented::passed(mechanism::oidc(), "partner-x").with_proof(evidence::OIDC_TOKEN, token)
     }
 
     #[test]
@@ -456,7 +437,8 @@ mod tests {
         let issuer = Issuer::new();
         let gate = issuer.verifier().without_nonce();
         let token = issuer.token(&claims("", NOW + 300));
-        let claim = Presented::passed(mechanism::oidc(), "someone-else").with_proof(TOKEN, &token);
+        let claim = Presented::passed(mechanism::oidc(), "someone-else")
+            .with_proof(evidence::OIDC_TOKEN, &token);
         let hmac = mint(r#"{"alg":"HS256"}"#, &claims("", NOW + 300), |_| {
             vec![0; 32]
         });
@@ -471,7 +453,8 @@ mod tests {
     #[test]
     fn another_mechanism_and_a_missing_proof_are_each_refused_by_name() {
         let gate = Issuer::new().verifier();
-        let other = Presented::passed(mechanism::jwt(), "partner-x").with_proof(TOKEN, "x.y.z");
+        let other = Presented::passed(mechanism::jwt(), "partner-x")
+            .with_proof(evidence::OIDC_TOKEN, "x.y.z");
         let bare = Presented::passed(mechanism::oidc(), "partner-x");
 
         assert!(
@@ -493,16 +476,20 @@ mod tests {
         let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).expect("a key");
         let document = format!(
             r#"{{"keys":[{{"kty":"RSA","alg":"RS256","n":"{}","e":"{}"}}]}}"#,
-            URL_SAFE_NO_PAD.encode(private.n().to_bytes_be()),
-            URL_SAFE_NO_PAD.encode(private.e().to_bytes_be())
+            codec::base64::encode_url_unpadded(&private.n().to_bytes_be()),
+            codec::base64::encode_url_unpadded(&private.e().to_bytes_be())
         );
         let signer = rsa::pkcs1v15::SigningKey::<rsa::sha2::Sha256>::new(private);
         let token = mint(r#"{"alg":"RS256"}"#, &claims("", NOW + 300), |input| {
             signer.sign(input).to_vec()
         });
-        let gate = Verifier::new(Jwks::parse(&document).expect("a set"), ISSUER, "xmip-node")
-            .without_nonce()
-            .with_clock(|| NOW);
+        let gate = Verifier::new(
+            KeySet::from_jwks(&document).expect("a set"),
+            ISSUER,
+            "xmip-node",
+        )
+        .without_nonce()
+        .with_clock(|| NOW);
 
         assert_eq!(
             gate.verify(&presented(&token)).expect("proven"),

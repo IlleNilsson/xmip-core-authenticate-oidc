@@ -23,24 +23,24 @@ path = "src/lib.rs"
 
 [dependencies]
 # A Technology depends on its parent Capability, never the reverse
-# (repository-model.md): authenticate for the trait and Presented, context
-# for Verified, xcore for the mechanism catalog.
-authenticate = { package = "xmip-core-authenticate", git = "https://github.com/IlleNilsson/xmip-core-authenticate", branch = "main" }
+# (repository-model.md): authenticate for the trait, Presented, the clock and
+# the JOSE keys, context for Verified, xcore for the mechanism catalog.
+authenticate = { package = "xmip-core-authenticate", git = "https://github.com/IlleNilsson/xmip-core-authenticate", branch = "main", features = ["jose"] }
 context = { package = "xmip-core-context", git = "https://github.com/IlleNilsson/xmip-core-context", branch = "main" }
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
 # identify holds the compact token reader both jwt-shaped gates share
 # (ADR-0050, amendment 2026-09-16).
 identify = { package = "xmip-core-identify", git = "https://github.com/IlleNilsson/xmip-core-identify", branch = "main" }
-# RS256 through rsa and ES256 through p256, as authenticate/jwt uses them;
-# serde_json reads the issuer's JWKS document, which is nested JSON.
-rsa = { version = "0.9", features = ["sha2"] }
-p256 = { version = "0.13", features = ["ecdsa"] }
-serde_json = "1"
+# The issuer's key set is the capability's JOSE keys (`jose`), which
+# authenticate/jwt verifies with too.
 
 [dev-dependencies]
-# The tests mint tokens: base64url to encode them, rand to generate keys.
-base64 = "0.22"
+# The tests mint tokens: rand to generate keys, RS256 and ES256 to sign with
+# as an issuer would, and the estate's base64url to encode them.
 rand = "0.8"
+rsa = { version = "0.9", features = ["sha2"] }
+p256 = { version = "0.13", features = ["ecdsa"] }
+codec = { package = "xmip-core-library-codec", git = "https://github.com/IlleNilsson/xmip-core-library-codec", branch = "main" }
 
 [lints.rust]
 # forbid, not deny: a module has no business writing unsafe. The one exception
