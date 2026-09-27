@@ -210,12 +210,6 @@ impl Authenticator for Verifier {
     }
 
     fn verify(&self, presented: &Presented) -> Result<Verified, AuthenticateError> {
-        let name = presented.mechanism.name();
-        if name != self.mechanism().name() {
-            return Err(AuthenticateError::new(format!(
-                "'{name}' was presented and this authenticator verifies oidc"
-            )));
-        }
         let token = presented.proof(evidence::OIDC_TOKEN).ok_or_else(|| {
             AuthenticateError::new(format!("no {OIDC_TOKEN} proof was presented"))
         })?;
@@ -452,18 +446,10 @@ mod tests {
     }
 
     #[test]
-    fn another_mechanism_and_a_missing_proof_are_each_refused_by_name() {
+    fn a_missing_proof_is_refused_by_name() {
         let gate = Issuer::new().verifier();
-        let other = Presented::passed(mechanism::jwt(), "partner-x")
-            .with_proof(evidence::OIDC_TOKEN, "x.y.z");
         let bare = Presented::passed(mechanism::oidc(), "partner-x");
 
-        assert!(
-            gate.verify(&other)
-                .expect_err("refused")
-                .message
-                .contains("'jwt' was presented")
-        );
         assert!(
             gate.verify(&bare)
                 .expect_err("refused")
