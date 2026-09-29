@@ -269,9 +269,7 @@ mod tests {
     }
 
     fn claims(extra: &str, expiry: i64) -> String {
-        format!(
-            r#"{{"iss":"{ISSUER}","sub":"partner-x","aud":["xmip-node"],"exp":{expiry}{extra}}}"#
-        )
+        format!(r#"{{"iss":"{ISSUER}","sub":"party-x","aud":["xmip-node"],"exp":{expiry}{extra}}}"#)
     }
 
     struct Issuer {
@@ -303,7 +301,7 @@ mod tests {
     }
 
     fn presented(token: &str) -> Presented {
-        Presented::passed(mechanism::oidc(), "partner-x").with_proof(evidence::OIDC_TOKEN, token)
+        Presented::passed(mechanism::oidc(), "party-x").with_proof(evidence::OIDC_TOKEN, token)
     }
 
     #[test]
@@ -331,12 +329,12 @@ mod tests {
     #[test]
     fn a_token_naming_the_expected_account_in_either_claim_and_spelling_is_proven() {
         let issuer = Issuer::new();
-        let gate = expecting(&issuer, "PARTNERX\\jane");
+        let gate = expecting(&issuer, "PARTYX\\jane");
         let by_upn = claims(
-            r#","upn":"Jane@PartnerX","preferred_username":"x@y""#,
+            r#","upn":"Jane@PartyX","preferred_username":"x@y""#,
             NOW + 300,
         );
-        let by_username = claims(r#","preferred_username":"jane@partnerx""#, NOW + 300);
+        let by_username = claims(r#","preferred_username":"jane@partyx""#, NOW + 300);
 
         for claims in [by_upn, by_username] {
             let verified = gate.verify(&presented(&issuer.token(&claims)));
@@ -347,8 +345,8 @@ mod tests {
     #[test]
     fn a_token_naming_another_account_is_refused_naming_both_and_one_naming_none_says_so() {
         let issuer = Issuer::new();
-        let gate = expecting(&issuer, "jane@partnerx");
-        let other = issuer.token(&claims(r#","upn":"mallory@partnerx""#, NOW + 300));
+        let gate = expecting(&issuer, "jane@partyx");
+        let other = issuer.token(&claims(r#","upn":"mallory@partyx""#, NOW + 300));
         let bare = issuer.token(&claims(r#","preferred_username":"jane""#, NOW + 300));
 
         let refused = gate.verify(&presented(&other)).expect_err("refused");
@@ -356,7 +354,7 @@ mod tests {
 
         assert_eq!(
             refused.message,
-            "the ID token names 'mallory@partnerx' and this node expects 'jane@partnerx'"
+            "the ID token names 'mallory@partyx' and this node expects 'jane@partyx'"
         );
         assert!(unnamed.message.contains("carries no user principal name"));
     }
@@ -396,7 +394,7 @@ mod tests {
         let gate = issuer.verifier().without_nonce();
         let expired = issuer.token(&claims("", NOW - 300));
         let endless = issuer.token(&format!(
-            r#"{{"iss":"{ISSUER}","sub":"partner-x","aud":"xmip-node"}}"#
+            r#"{{"iss":"{ISSUER}","sub":"party-x","aud":"xmip-node"}}"#
         ));
 
         let past = gate.verify(&presented(&expired)).expect_err("refused");
@@ -412,10 +410,10 @@ mod tests {
         let gate = issuer.verifier().without_nonce();
         let exp = NOW + 300;
         let foreign = issuer.token(&format!(
-            r#"{{"iss":"https://other.example","sub":"partner-x","aud":"xmip-node","exp":{exp}}}"#
+            r#"{{"iss":"https://other.example","sub":"party-x","aud":"xmip-node","exp":{exp}}}"#
         ));
         let elsewhere = issuer.token(&format!(
-            r#"{{"iss":"{ISSUER}","sub":"partner-x","aud":"another-client","exp":{exp}}}"#
+            r#"{{"iss":"{ISSUER}","sub":"party-x","aud":"another-client","exp":{exp}}}"#
         ));
         let lent = issuer.token(&claims(r#","azp":"another-client""#, exp));
 
@@ -448,7 +446,7 @@ mod tests {
     #[test]
     fn a_missing_proof_is_refused_by_name() {
         let gate = Issuer::new().verifier();
-        let bare = Presented::passed(mechanism::oidc(), "partner-x");
+        let bare = Presented::passed(mechanism::oidc(), "party-x");
 
         assert!(
             gate.verify(&bare)
