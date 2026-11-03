@@ -242,6 +242,8 @@ impl Authenticator for Verifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use p256::ecdsa::signature::Signer as _;
+    use p256::elliptic_curve::Generate as _;
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::traits::PublicKeyParts;
 
@@ -260,7 +262,7 @@ mod tests {
 
     /// A P-256 key as a JWK, as an issuer would publish it.
     fn p256_jwk(id: &str, key: &p256::ecdsa::SigningKey) -> String {
-        let point = key.verifying_key().to_encoded_point(false);
+        let point = key.verifying_key().to_sec1_point(false);
         format!(
             r#"{{"kty":"EC","crv":"P-256","use":"sig","kid":"{id}","x":"{}","y":"{}"}}"#,
             codec::base64::encode_url_unpadded(point.x().expect("x")),
@@ -279,7 +281,7 @@ mod tests {
     impl Issuer {
         fn new() -> Self {
             Self {
-                key: p256::ecdsa::SigningKey::random(&mut rand::rngs::OsRng),
+                key: p256::ecdsa::SigningKey::generate(),
             }
         }
 
