@@ -41,7 +41,8 @@ use identify::Presented;
 use identify::UserPrincipalName;
 use identify::evidence::{self, OIDC_TOKEN};
 use identify::jwt::Compact;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Mutex;
+use xcore::lock::Locked;
 use xcore::{Mechanism, mechanism};
 
 /// How many nonces may be outstanding before the oldest is forgotten.
@@ -108,7 +109,7 @@ impl Verifier {
     /// was built [`without_nonce`](Self::without_nonce).
     pub fn issued(&self, nonce: impl Into<String>) {
         if let Some(nonces) = &self.nonces {
-            let mut outstanding = locked(nonces);
+            let mut outstanding = nonces.locked();
             if outstanding.len() >= OUTSTANDING {
                 outstanding.remove(0);
             }
@@ -186,7 +187,7 @@ impl Verifier {
                 "the ID token carries no nonce and this node expects the one it sent",
             ));
         };
-        let mut outstanding = locked(nonces);
+        let mut outstanding = nonces.locked();
         match outstanding.iter().position(|held| *held == nonce) {
             Some(at) => {
                 outstanding.remove(at);
@@ -198,10 +199,6 @@ impl Verifier {
             )),
         }
     }
-}
-
-fn locked(nonces: &Mutex<Vec<String>>) -> MutexGuard<'_, Vec<String>> {
-    nonces.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Authenticator for Verifier {
