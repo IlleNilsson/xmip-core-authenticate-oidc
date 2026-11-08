@@ -10,7 +10,9 @@
 //! `iss` is the issuer the node trusts, the `aud` names the node's client id
 //! and an `azp`, where there is one, is that client id too, `exp` has not
 //! passed and `nbf` has come, with the configured leeway, and the subject is
-//! the value that was claimed.
+//! the value that was claimed. The issuer, audience and expiry checks are
+//! the capability's (`authenticate::claims`), the ones `jwt`, `oauth2` and
+//! `saml` make too.
 //!
 //! The nonce is the node's own. Whoever sent the authentication request
 //! tells this verifier the nonce with [`Verifier::issued`]; a token must then
@@ -33,7 +35,8 @@
 //! `UserPrincipalName` and must be the same account, whichever way either
 //! was spelled (ADR-0054). Without it nothing about the name is asked.
 
-use authenticate::clock::{Clock, Window};
+use authenticate::claims::{self, Expected};
+use authenticate::clock::Clock;
 use authenticate::jose::{Algorithm, KeySet};
 use authenticate::{AuthenticateError, Authenticator};
 use context::Verified;
@@ -52,22 +55,22 @@ const OUTSTANDING: usize = 4096;
 /// the client id the node is known to that issuer by.
 pub struct Verifier {
     keys: KeySet,
-    issuer: String,
-    client: String,
+    expected: Expected,
     nonces: Option<Mutex<Vec<String>>>,
     principal: Option<UserPrincipalName>,
     clock: Clock,
 }
 
 impl Verifier {
-    /// Verifies tokens from `issuer` for the client id `client` against
-    /// `keys`, requiring an outstanding nonce, with sixty seconds of leeway.
+    /// Verifies tokens from the issuer `expected` names, for the client id
+    /// it names as the audience, against `keys`, requiring an outstanding
+    /// nonce, with sixty seconds of leeway. `Expected` refuses an empty
+    /// issuer or client id, so a verifier that takes any cannot be made.
     #[must_use]
-    pub fn new(keys: KeySet, issuer: impl Into<String>, client: impl Into<String>) -> Self {
+    pub fn new(keys: KeySet, expected: Expected) -> Self {
         Self {
             keys,
-            issuer: issuer.into(),
-            client: client.into(),
+            expected,
             nonces: Some(Mutex::new(Vec::new())),
             principal: None,
             clock: Clock::system(60),
@@ -118,34 +121,26 @@ impl Verifier {
     }
 
     fn check_claims(&self, compact: &Compact, subject: &str) -> Result<(), AuthenticateError> {
-        if compact.claim("iss").as_deref() != Some(self.issuer.as_str()) {
-            return Err(AuthenticateError::new(format!(
-                "the ID token's issuer is not '{}'",
-                self.issuer
-            )));
-        }
-        if !compact.strings_claim("aud").contains(&self.client) {
-            return Err(AuthenticateError::new(format!(
-                "the ID token's audience does not name this node's client id '{}'",
-                self.client
-            )));
-        }
+        self.expected
+            .issued("the ID token", compact.claim("iss").as_deref())?;
+        self.expected.addressed(
+            "the ID token",
+            compact.strings_claim("aud").iter().map(String::as_str),
+        )?;
+        let client = self.expected.audience();
         if let Some(party) = compact.claim("azp")
-            && party != self.client
+            && party != client
         {
             return Err(AuthenticateError::new(format!(
-                "the ID token was issued to '{party}' (azp) and not to '{}'",
-                self.client
+                "the ID token was issued to '{party}' (azp) and not to '{client}'"
             )));
         }
-        let Some(expiry) = compact.numeric_claim("exp") else {
-            return Err(AuthenticateError::new(
-                "the ID token carries no `exp` and OIDC requires one",
-            ));
-        };
-        self.clock
-            .admits(Window::between(compact.numeric_claim("nbf"), Some(expiry)))
-            .map_err(|outside| AuthenticateError::new(format!("the ID token {outside}")))?;
+        claims::current(
+            "the ID token",
+            &self.clock,
+            compact.numeric_claim("nbf"),
+            ("exp", compact.numeric_claim("exp")),
+        )?;
         if compact.claim("sub").as_deref() != Some(subject) {
             return Err(AuthenticateError::new(
                 "the ID token's subject is not the claimed value",
@@ -295,7 +290,7 @@ mod tests {
         }
 
         fn verifier(&self) -> Verifier {
-            Verifier::new(self.jwks(), ISSUER, "xmip-node").with_clock(|| NOW)
+            Verifier::new(self.jwks(), node()).with_clock(|| NOW)
         }
     }
 
@@ -467,17 +462,24 @@ mod tests {
         let token = mint(r#"{"alg":"RS256"}"#, &claims("", NOW + 300), |input| {
             signer.sign(input).to_vec()
         });
-        let gate = Verifier::new(
-            KeySet::from_jwks(&document).expect("a set"),
-            ISSUER,
-            "xmip-node",
-        )
-        .without_nonce()
-        .with_clock(|| NOW);
+        let gate = Verifier::new(KeySet::from_jwks(&document).expect("a set"), node())
+            .without_nonce()
+            .with_clock(|| NOW);
 
         assert_eq!(
             gate.verify(&presented(&token)).expect("proven"),
             Verified::Proven
         );
+    }
+
+    #[test]
+    fn a_verifier_cannot_be_made_for_an_empty_issuer_or_client() {
+        assert!(Expected::new("", "xmip-node").is_err());
+        assert!(Expected::new(ISSUER, "").is_err());
+    }
+
+    /// This node, as the issuer knows it.
+    fn node() -> Expected {
+        Expected::new(ISSUER, "xmip-node").expect("an issuer and a client id")
     }
 }
