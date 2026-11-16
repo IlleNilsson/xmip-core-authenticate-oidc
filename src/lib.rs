@@ -22,8 +22,8 @@
 //! with [`Verifier::without_nonce`], and gives replay protection up knowingly.
 //!
 //! Offline throughout (ADR-0045): the key set is configuration, a JWKS
-//! document read by the capability's `KeySet::from_jwks` (`authenticate::jose`,
-//! the keys `jwt` verifies with too), never fetched from `jwks_uri`, and
+//! document read by the library's `KeySet::from_jwks` (`jose::jwk`, the
+//! keys `jwt` verifies with too), never fetched from `jwks_uri`, and
 //! rotated by whoever rotates configuration. RS256 and ES256 are verified;
 //! any other algorithm, `none` and the HMAC family included, is refused by
 //! name. `at_hash` and `c_hash` are not checked, because no access token or
@@ -37,13 +37,14 @@
 
 use authenticate::claims::{self, Expected};
 use authenticate::clock::Clock;
-use authenticate::jose::{Algorithm, KeySet};
 use authenticate::{AuthenticateError, Authenticator};
 use context::Verified;
 use identify::Presented;
 use identify::UserPrincipalName;
 use identify::evidence::{self, OIDC_TOKEN};
-use identify::jwt::Compact;
+use jose::jwk::KeySet;
+use jose::jws::Algorithm;
+use jose::jwt::Token;
 use std::sync::Mutex;
 use xcore::lock::Locked;
 use xcore::{Mechanism, mechanism};
@@ -120,15 +121,11 @@ impl Verifier {
         }
     }
 
-    fn check_claims(&self, compact: &Compact, subject: &str) -> Result<(), AuthenticateError> {
-        self.expected
-            .issued("the ID token", compact.claim("iss").as_deref())?;
-        self.expected.addressed(
-            "the ID token",
-            compact.strings_claim("aud").iter().map(String::as_str),
-        )?;
+    fn check_claims(&self, token: &Token, subject: &str) -> Result<(), AuthenticateError> {
+        self.expected.issued("the ID token", token.issuer())?;
+        self.expected.addressed("the ID token", token.audience())?;
         let client = self.expected.audience();
-        if let Some(party) = compact.claim("azp")
+        if let Some(party) = token.claim("azp")
             && party != client
         {
             return Err(AuthenticateError::new(format!(
@@ -138,10 +135,10 @@ impl Verifier {
         claims::current(
             "the ID token",
             &self.clock,
-            compact.numeric_claim("nbf"),
-            ("exp", compact.numeric_claim("exp")),
+            token.not_before(),
+            ("exp", token.expiry()),
         )?;
-        if compact.claim("sub").as_deref() != Some(subject) {
+        if token.subject() != Some(subject) {
             return Err(AuthenticateError::new(
                 "the ID token's subject is not the claimed value",
             ));
@@ -150,15 +147,11 @@ impl Verifier {
     }
 
     /// Where an account is expected, the token names it.
-    fn check_principal(&self, compact: &Compact) -> Result<(), AuthenticateError> {
+    fn check_principal(&self, token: &Token) -> Result<(), AuthenticateError> {
         let Some(expected) = &self.principal else {
             return Ok(());
         };
-        let read = |claim: &str| {
-            compact
-                .claim(claim)
-                .and_then(|text| UserPrincipalName::parse(&text))
-        };
+        let read = |claim: &str| token.claim(claim).and_then(UserPrincipalName::parse);
         match read("upn").or_else(|| read("preferred_username")) {
             Some(named) if named.is(expected) => Ok(()),
             Some(named) => Err(AuthenticateError::new(format!(
@@ -173,11 +166,11 @@ impl Verifier {
 
     /// Spend the token's nonce. Last, so a token that fails another check
     /// does not cost the login its nonce.
-    fn spend_nonce(&self, compact: &Compact) -> Result<(), AuthenticateError> {
+    fn spend_nonce(&self, token: &Token) -> Result<(), AuthenticateError> {
         let Some(nonces) = &self.nonces else {
             return Ok(());
         };
-        let Some(nonce) = compact.claim("nonce") else {
+        let Some(nonce) = token.claim("nonce") else {
             return Err(AuthenticateError::new(
                 "the ID token carries no nonce and this node expects the one it sent",
             ));
@@ -205,11 +198,10 @@ impl Authenticator for Verifier {
         let token = presented.proof(evidence::OIDC_TOKEN).ok_or_else(|| {
             AuthenticateError::new(format!("no {OIDC_TOKEN} proof was presented"))
         })?;
-        let compact =
-            Compact::parse(token).map_err(|failure| AuthenticateError::new(failure.message))?;
+        let read = Token::read(token)?;
 
-        let named = compact.algorithm().unwrap_or_default();
-        let algorithm = Algorithm::named(&named)
+        let named = read.jws.algorithm().unwrap_or_default();
+        let algorithm = Algorithm::named(named)
             .filter(|algorithm| *algorithm != Algorithm::Hs256)
             .ok_or_else(|| {
                 AuthenticateError::new(format!(
@@ -219,13 +211,13 @@ impl Authenticator for Verifier {
             })?;
         self.keys.verify(
             algorithm,
-            compact.key_id().as_deref(),
-            compact.signing_input.as_bytes(),
-            &compact.signature,
+            read.jws.key_id(),
+            read.jws.signing_input.as_bytes(),
+            &read.jws.signature,
         )?;
-        self.check_claims(&compact, &presented.value)?;
-        self.check_principal(&compact)?;
-        self.spend_nonce(&compact)?;
+        self.check_claims(&read, &presented.value)?;
+        self.check_principal(&read)?;
+        self.spend_nonce(&read)?;
 
         Ok(Verified::Proven)
     }

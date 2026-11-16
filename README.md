@@ -7,7 +7,8 @@ It checks an ID token's RS256 or ES256 signature against a JWKS document held
 as configuration, then issuer, audience, `azp`, expiry with leeway, the subject
 and a nonce the node issued, spent once. It never fetches `jwks_uri` or a
 discovery document (ADR-0045), and it does not check `at_hash` or `c_hash`.
-The key set is the capability's `authenticate::jose`, which `jwt` verifies
+The ID token and the key set are the estate's one JOSE,
+`xmip-core-library-jose` (`jose::jwt`, `jose::jwk`), which `jwt` verifies
 with too, and the window is `authenticate::clock`'s.
 
 ## Toolchain

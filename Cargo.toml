@@ -23,20 +23,21 @@ path = "src/lib.rs"
 
 [dependencies]
 # A Technology depends on its parent Capability, never the reverse
-# (repository-model.md): authenticate for the trait, Presented, the clock and
-# the JOSE keys, context for Verified, xcore for the mechanism catalog.
-authenticate = { package = "xmip-core-authenticate", git = "https://github.com/IlleNilsson/xmip-core-authenticate", branch = "main", features = ["jose"] }
+# (repository-model.md): authenticate for the trait, the clock and the claims
+# checks, context for Verified, xcore for the mechanism catalog.
+authenticate = { package = "xmip-core-authenticate", git = "https://github.com/IlleNilsson/xmip-core-authenticate", branch = "main" }
 context = { package = "xmip-core-context", git = "https://github.com/IlleNilsson/xmip-core-context", branch = "main" }
 xcore = { package = "xmip-core", git = "https://github.com/IlleNilsson/xmip-core", branch = "main" }
-# identify holds the compact token reader both jwt-shaped gates share
-# (ADR-0050, amendment 2026-09-16).
+# identify for Presented, the evidence names and the user principal name.
 identify = { package = "xmip-core-identify", git = "https://github.com/IlleNilsson/xmip-core-identify", branch = "main" }
-# The issuer's key set is the capability's JOSE keys (`jose`), which
-# authenticate/jwt verifies with too.
+# The ID token and the issuer's key set are the estate's one JOSE
+# (`jose::jwt`, `jose::jwk`), which authenticate/jwt verifies with too.
+jose = { package = "xmip-core-library-jose", git = "https://github.com/IlleNilsson/xmip-core-library-jose", branch = "main", features = ["key"] }
 
 [dev-dependencies]
 # The tests mint tokens: rand to generate the RSA key, RS256 and ES256 to
-# sign with as an issuer would, and the estate's base64url to encode them.
+# sign with as an issuer would, by implementations other than the one that
+# verifies, and the estate's base64url to encode them.
 # rand 0.8, not the newest: rsa 0.9, the newest release, draws from
 # rand_core 0.6, the generation rand 0.8 is on. p256 draws its own key.
 rand = "0.8"
